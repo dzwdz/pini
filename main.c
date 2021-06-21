@@ -27,6 +27,8 @@ struct {
 
 	int x;
 	int y;
+
+	struct { int x; int y; } cursor;
 } terminal;
 
 pid_t child_pid;
@@ -98,7 +100,7 @@ void load_font(const char *path) {
 		die("gzfread failed");
 }
 
-void render_char(uint32_t x, uint32_t y, char c) {
+void render_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg) {
 	// straight up stolen from https://cmcenroe.me/2018/01/30/fbclock.html
 	if (c > font.length) return;
 	uint8_t *glyph = &font.glyphs[c * font.charsize];
@@ -108,7 +110,7 @@ void render_char(uint32_t x, uint32_t y, char c) {
 			uint8_t bits = glyph[gy * stride + gx / 8];
 			uint8_t bit  = bits >> (7 - gx % 8) & 1;
 			framebuffer.buf[(y * font.height + gy + terminal.y) * framebuffer.width
-			               + x * font.width  + gx + terminal.x] = bit ? 0xebdbb2 : 0x1d2021;
+			               + x * font.width  + gx + terminal.x] = bit ? fg : bg;
 		}
 	}
 }
@@ -170,9 +172,37 @@ void bridge_stdin(int target) {
 	}
 }
 
+// TODO this is bad...
+uint32_t get_color(tmt_color_t color, bool fg) {
+	switch (color) {
+		case TMT_COLOR_WHITE: return 0xebdbb2;
+		case TMT_COLOR_BLACK: return 0x1d2021;
+		default:              return fg ? get_color(TMT_COLOR_WHITE, fg)
+		                                : get_color(TMT_COLOR_BLACK, fg);
+	}
+}
+
+void draw_line(TMT *vt, int y) {
+	const TMTSCREEN *s = tmt_screen(vt);
+
+	for (size_t x = 0; x < s->ncol; x++) {
+		TMTCHAR chr = s->lines[y]->chars[x];
+		uint32_t fg = get_color(chr.a.fg, true);
+		uint32_t bg = get_color(chr.a.bg, false);
+		if ((terminal.cursor.x == x && terminal.cursor.y == y)
+				^ chr.a.reverse) {
+			uint32_t tmp = fg;
+			fg = bg;
+			bg = tmp;
+		}
+		render_char(x, y, chr.c, fg, bg);
+	}
+}
+
 void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 	const TMTSCREEN *s = tmt_screen(vt);
 	const TMTPOINT *c = tmt_cursor(vt);
+	int old_y;
 
 	switch (m) {
 		case TMT_MSG_BELL:
@@ -180,12 +210,9 @@ void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 			break;
 
 		case TMT_MSG_UPDATE:
-			for (size_t r = 0; r < s->nline; r++){
-				if (s->lines[r]->dirty){
-					for (size_t c = 0; c < s->ncol; c++)
-						render_char(c, r, s->lines[r]->chars[c].c);
-				}
-			}
+			for (size_t y = 0; y < s->nline; y++)
+				if (s->lines[y]->dirty)
+					draw_line(vt, y);
 			tmt_clean(vt);
 			break;
 
@@ -194,7 +221,12 @@ void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 			break;
 
 		case TMT_MSG_MOVED:
-			//printf("cursor is now at %zd,%zd\n", c->r, c->c);
+			old_y = terminal.cursor.y;
+			terminal.cursor.x = c->c;
+			terminal.cursor.y = c->r;
+			draw_line(vt, terminal.cursor.y);
+			if (old_y != terminal.cursor.y)
+				draw_line(vt, old_y);
 			break;
 
 		case TMT_MSG_CURSOR:
