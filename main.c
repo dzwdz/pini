@@ -140,6 +140,8 @@ int run_pty(const char *cmd, const char *args[]) {
 			close(s);
 			close(m);
 
+			setenv("TERM", "ansi", 1);
+
 			execvp(cmd, args);
 			die("execvp(): %s\n", errstr);
 		default:
