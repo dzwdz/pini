@@ -51,7 +51,7 @@ struct {
 // will land in config.h
 void default_position() {
 	terminal.width = 80;
-	terminal.height = framebuffer.height / font.height;
+	terminal.height = 24;//framebuffer.height / font.height;
 }
 
 // TODO merge into a resize() fun
@@ -119,8 +119,8 @@ void render_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg) {
 int run_pty(const char *cmd, const char *args[]) {
 	int m, s;
 	struct winsize ws;
-	ws.ws_row = terminal.width;
-	ws.ws_col = terminal.height;
+	ws.ws_col = terminal.width;
+	ws.ws_row = terminal.height;
 	if (openpty(&m, &s, NULL, NULL, &ws) < 0)
 		die("openpty(): %s\n", errstr);
 
