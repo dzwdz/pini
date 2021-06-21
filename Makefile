@@ -1,2 +1,2 @@
 fbtmt: main.c libtmt/tmt.c
-	cc -o $@ $^
+	cc -o $@ $^ -lz

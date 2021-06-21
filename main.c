@@ -1,18 +1,96 @@
 #include "libtmt/tmt.h"
 #include <errno.h>
+#include <fcntl.h>
+#include <linux/fb.h>
 #include <pty.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+// fonts
+#include "psf.h"
+#include <zlib.h>
 
 #define die(...) {fprintf(stderr, __VA_ARGS__); exit(1);}
 #define errstr (strerror(errno)) // i'm tried of typing it over and over
 
 TMT *vt;
+int pty;
 pid_t child_pid;
+
+struct {
+	uint32_t *buf;
+	int width;
+	int height;
+} framebuffer;
+
+struct {
+	uint8_t *glyphs;
+	int length;
+	int charsize;
+	int width;
+	int height;
+} font;
+
+
+void open_fb() {
+	int fd;
+	struct fb_var_screeninfo info;
+
+	fd = open("/dev/fb0", O_RDWR);
+	if (fd < 0) die("couldn't open the framebuffer: %s\n", errstr);
+	
+	if (ioctl(fd, FBIOGET_VSCREENINFO, &info) != 0)
+		die("failed to get framebuffer info\n");
+
+	framebuffer.width  = info.xres;
+	framebuffer.height = info.yres;
+
+	framebuffer.buf = mmap(NULL, 4 * framebuffer.width * framebuffer.height,
+	                       PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+	if (framebuffer.buf == MAP_FAILED)
+		die("mmap(): %s\n", errstr);
+}
+
+void load_font(const char *path) {
+	// shoutouts to https://cmcenroe.me/2018/01/30/fbclock.html
+	gzFile file = gzopen(path, "r");
+	struct psf2_header header;
+
+	if (!file)
+		die("gzopen failed");
+	if (gzfread(&header, sizeof(header), 1, file) != 1)
+		die("gzfread failed");
+
+	font.length   = header.length;
+	font.charsize = header.charsize;
+	font.width    = header.width;
+	font.height   = header.height;
+
+	font.glyphs = malloc(sizeof(uint8_t) * font.length * font.charsize);
+	if (gzfread(font.glyphs, font.charsize, font.length, file) != font.length)
+		die("gzfread failed");
+}
+
+void render_char(uint32_t x, uint32_t y, char c) {
+	// straight up stolen from https://cmcenroe.me/2018/01/30/fbclock.html
+	if (c > font.length) return;
+	uint8_t *glyph = &font.glyphs[c * font.charsize];
+	uint32_t stride = font.charsize / font.height;
+	for (uint32_t gy = 0; gy < font.height; gy++) {
+		for (uint32_t gx = 0; gx < font.width; gx++) {
+			uint8_t bits = glyph[gy * stride + gx / 8];
+			uint8_t bit  = bits >> (7 - gx % 8) & 1;
+			framebuffer.buf[(y * font.height + gy) * framebuffer.width
+			               + x * font.width + gx] = bit ? 0xFFFFFF : 0xFF0000;
+		}
+	}
+}
 
 /* runs a process in a new pty, returns the fd of the controlling end */
 int run_pty(const char *cmd, const char *args[]) {
@@ -71,15 +149,47 @@ void bridge_stdin(int target) {
 }
 
 void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
+	const TMTSCREEN *s = tmt_screen(vt);
+	const TMTPOINT *c = tmt_cursor(vt);
 
+	switch (m) {
+		case TMT_MSG_BELL:
+			puts("bell");
+			break;
+
+		case TMT_MSG_UPDATE:
+			for (size_t r = 0; r < s->nline; r++){
+				if (s->lines[r]->dirty){
+					for (size_t c = 0; c < s->ncol; c++)
+						render_char(c, r, s->lines[r]->chars[c].c);
+				}
+			}
+			tmt_clean(vt);
+			break;
+
+		case TMT_MSG_ANSWER:
+			write(pty, a, strlen(a));
+			break;
+
+		case TMT_MSG_MOVED:
+			//printf("cursor is now at %zd,%zd\n", c->r, c->c);
+			break;
+
+		case TMT_MSG_CURSOR:
+			//printf("cursor state: %s\n", (const char *)a);
+			break;
+	}
 }
 
 int main() {
-	const char *sh[] = { "/bin/sh", NULL };
-	int pty = run_pty(sh[0], sh);
+	load_font("/usr/share/kbd/consolefonts/default8x16.psfu.gz");
+	open_fb();
 
-	//vt = tmt_open(25, 80, vt_callback, NULL, NULL);
-	//if (!vt) die("tmt_open(): %s\n", errstr);
+	const char *sh[] = { "/bin/sh", NULL };
+	pty = run_pty(sh[0], sh);
+
+	vt = tmt_open(25, 80, vt_callback, NULL, NULL);
+	if (!vt) die("tmt_open(): %s\n", errstr);
 
 	bridge_stdin(pty);
 
@@ -87,9 +197,8 @@ int main() {
 	int len;
 
 	while ((len = read(pty, buf, sizeof(buf))) > 0) {
-		write(STDIN_FILENO, buf, len);
-		//tmt_write(vt, buf, len);
+		tmt_write(vt, buf, len);
 	}
 
-	//tmt_close(vt);
+	tmt_close(vt);
 }
