@@ -1,0 +1,3 @@
+[submodule "libtmt"]
+	path = libtmt
+	url = git@github.com:deadpixi/libtmt.git
