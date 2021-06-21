@@ -18,8 +18,17 @@
 #define die(...) {fprintf(stderr, __VA_ARGS__); exit(1);}
 #define errstr (strerror(errno)) // i'm tried of typing it over and over
 
-TMT *vt;
-int pty;
+struct {
+	TMT *tmt;
+	int fd;
+
+	int width;
+	int height;
+
+	int x;
+	int y;
+} terminal;
+
 pid_t child_pid;
 
 struct {
@@ -36,6 +45,18 @@ struct {
 	int height;
 } font;
 
+
+// will land in config.h
+void default_position() {
+	terminal.width = 80;
+	terminal.height = framebuffer.height / font.height;
+}
+
+// TODO merge into a resize() fun
+void center() {
+	terminal.x = (framebuffer.width  - font.width  * terminal.width ) / 2;
+	terminal.y = (framebuffer.height - font.height * terminal.height) / 2;
+}
 
 void open_fb() {
 	int fd;
@@ -86,8 +107,8 @@ void render_char(uint32_t x, uint32_t y, char c) {
 		for (uint32_t gx = 0; gx < font.width; gx++) {
 			uint8_t bits = glyph[gy * stride + gx / 8];
 			uint8_t bit  = bits >> (7 - gx % 8) & 1;
-			framebuffer.buf[(y * font.height + gy) * framebuffer.width
-			               + x * font.width + gx] = bit ? 0xFFFFFF : 0xFF0000;
+			framebuffer.buf[(y * font.height + gy + terminal.y) * framebuffer.width
+			               + x * font.width  + gx + terminal.x] = bit ? 0xebdbb2 : 0x1d2021;
 		}
 	}
 }
@@ -95,7 +116,10 @@ void render_char(uint32_t x, uint32_t y, char c) {
 /* runs a process in a new pty, returns the fd of the controlling end */
 int run_pty(const char *cmd, const char *args[]) {
 	int m, s;
-	if (openpty(&m, &s, NULL, NULL, NULL) < 0)
+	struct winsize ws;
+	ws.ws_row = terminal.width;
+	ws.ws_col = terminal.height;
+	if (openpty(&m, &s, NULL, NULL, &ws) < 0)
 		die("openpty(): %s\n", errstr);
 
 	switch (child_pid = fork()) {
@@ -135,14 +159,12 @@ void bridge_stdin(int target) {
 			// TODO restore
 			tcgetattr(STDIN_FILENO, &raw);
 			raw.c_iflag &= ~(ICRNL);
-			raw.c_lflag &= ~(ECHO | ICANON | /*ISIG |*/ IEXTEN | ICRNL);
+			raw.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN | ICRNL);
 			tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 
 			while ((len = read(STDIN_FILENO, buf, sizeof(buf))) > 0) {
 				write(target, buf, len);
 			}
-
-			die("bridge_stdin done");
 		default:
 			return;
 	}
@@ -154,7 +176,7 @@ void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 
 	switch (m) {
 		case TMT_MSG_BELL:
-			puts("bell");
+			// no.
 			break;
 
 		case TMT_MSG_UPDATE:
@@ -168,7 +190,7 @@ void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 			break;
 
 		case TMT_MSG_ANSWER:
-			write(pty, a, strlen(a));
+			write(terminal.fd, a, strlen(a));
 			break;
 
 		case TMT_MSG_MOVED:
@@ -184,21 +206,24 @@ void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 int main() {
 	load_font("/usr/share/kbd/consolefonts/default8x16.psfu.gz");
 	open_fb();
+	default_position();
+	center();
 
 	const char *sh[] = { "/bin/sh", NULL };
-	pty = run_pty(sh[0], sh);
+	terminal.fd = run_pty(sh[0], sh);
 
-	vt = tmt_open(25, 80, vt_callback, NULL, NULL);
-	if (!vt) die("tmt_open(): %s\n", errstr);
+	terminal.tmt = tmt_open(terminal.height, terminal.width,
+	                        vt_callback, NULL, NULL);
+	if (!terminal.tmt) die("tmt_open(): %s\n", errstr);
 
-	bridge_stdin(pty);
+	bridge_stdin(terminal.fd);
 
 	char buf[1024];
 	int len;
 
-	while ((len = read(pty, buf, sizeof(buf))) > 0) {
-		tmt_write(vt, buf, len);
+	while ((len = read(terminal.fd, buf, sizeof(buf))) > 0) {
+		tmt_write(terminal.tmt, buf, len);
 	}
 
-	tmt_close(vt);
+	tmt_close(terminal.tmt);
 }
