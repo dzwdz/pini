@@ -29,15 +29,13 @@ struct {
 	int y;
 
 	struct { int x; int y; } cursor;
-} terminal;
-
-pid_t child_pid;
+} term;
 
 struct {
 	uint32_t *buf;
 	int width;
 	int height;
-} framebuffer;
+} fb;
 
 struct {
 	uint8_t *glyphs;
@@ -47,36 +45,44 @@ struct {
 	int height;
 } font;
 
+    void config_init();
+    void center();
+    void init_fb();
+    void load_font(const char *path);
+    void render_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg);
+     int run_pty(const char *cmd, const char *args[]);
+    void bridge_stdin(int target);
+uint32_t get_color(tmt_color_t color, bool fg);
+    void draw_line(TMT *vt, int y);
+    void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p);
 
-// will land in config.h
-void default_position() {
-	terminal.width = 80;
-	terminal.height = 24;//framebuffer.height / font.height;
+// will land in config.h very soon
+void config_init() {
+	term.width  = 80;
+	term.height = fb.height / font.height;
 }
 
 // TODO merge into a resize() fun
 void center() {
-	terminal.x = (framebuffer.width  - font.width  * terminal.width ) / 2;
-	terminal.y = (framebuffer.height - font.height * terminal.height) / 2;
+	term.x = (fb.width  - font.width  * term.width ) / 2;
+	term.y = (fb.height - font.height * term.height) / 2;
 }
 
-void open_fb() {
-	int fd;
+void init_fb() {
 	struct fb_var_screeninfo info;
+	int fd;
 
 	fd = open("/dev/fb0", O_RDWR);
-	if (fd < 0) die("couldn't open the framebuffer: %s\n", errstr);
+	if (fd < 0) die("couldn't open the fb: %s\n", errstr);
 	
 	if (ioctl(fd, FBIOGET_VSCREENINFO, &info) != 0)
-		die("failed to get framebuffer info\n");
+		die("failed to get fb info\n");
+	fb.width  = info.xres;
+	fb.height = info.yres;
 
-	framebuffer.width  = info.xres;
-	framebuffer.height = info.yres;
-
-	framebuffer.buf = mmap(NULL, 4 * framebuffer.width * framebuffer.height,
-	                       PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-
-	if (framebuffer.buf == MAP_FAILED)
+	fb.buf = mmap(NULL, 4 * fb.width * fb.height,
+	              PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (fb.buf == MAP_FAILED)
 		die("mmap(): %s\n", errstr);
 }
 
@@ -109,44 +115,28 @@ void render_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg) {
 		for (uint32_t gx = 0; gx < font.width; gx++) {
 			uint8_t bits = glyph[gy * stride + gx / 8];
 			uint8_t bit  = bits >> (7 - gx % 8) & 1;
-			framebuffer.buf[(y * font.height + gy + terminal.y) * framebuffer.width
-			               + x * font.width  + gx + terminal.x] = bit ? fg : bg;
+			fb.buf[(y * font.height + gy + term.y) * fb.width
+			      + x * font.width  + gx + term.x] = bit ? fg : bg;
 		}
 	}
 }
 
 /* runs a process in a new pty, returns the fd of the controlling end */
 int run_pty(const char *cmd, const char *args[]) {
-	int m, s;
 	struct winsize ws;
-	ws.ws_col = terminal.width;
-	ws.ws_row = terminal.height;
-	if (openpty(&m, &s, NULL, NULL, &ws) < 0)
-		die("openpty(): %s\n", errstr);
+	int fd;
+	ws.ws_col = term.width;
+	ws.ws_row = term.height;
 
-	switch (child_pid = fork()) {
+	switch (forkpty(&fd, NULL, NULL, &ws)) {
 		case -1:
-			die("fork(): %s\n", errstr);
+			die("forkpty(): %s\n", errstr);
 		case 0:
-			dup2(s, 0);
-			dup2(s, 1);
-			dup2(s, 2);
-
-			// set the pty as the controlling terminal
-			setsid();
-			if (ioctl(s, TIOCSCTTY, NULL) < 0)
-				die("ioctl(): %s\n", errstr);
-
-			close(s);
-			close(m);
-
 			setenv("TERM", "ansi", 1);
-
 			execvp(cmd, args);
 			die("execvp(): %s\n", errstr);
 		default:
-			close(s);
-			return m;
+			return fd;
 	}
 }
 
@@ -191,8 +181,8 @@ void draw_line(TMT *vt, int y) {
 		TMTCHAR chr = s->lines[y]->chars[x];
 		uint32_t fg = get_color(chr.a.fg, true);
 		uint32_t bg = get_color(chr.a.bg, false);
-		if ((terminal.cursor.x == x && terminal.cursor.y == y)
-				^ chr.a.reverse) {
+
+		if ((term.cursor.x == x && term.cursor.y == y) ^ chr.a.reverse) {
 			uint32_t tmp = fg;
 			fg = bg;
 			bg = tmp;
@@ -219,15 +209,15 @@ void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 			break;
 
 		case TMT_MSG_ANSWER:
-			write(terminal.fd, a, strlen(a));
+			write(term.fd, a, strlen(a));
 			break;
 
 		case TMT_MSG_MOVED:
-			old_y = terminal.cursor.y;
-			terminal.cursor.x = c->c;
-			terminal.cursor.y = c->r;
-			draw_line(vt, terminal.cursor.y);
-			if (old_y != terminal.cursor.y)
+			old_y = term.cursor.y;
+			term.cursor.x = c->c;
+			term.cursor.y = c->r;
+			draw_line(vt, term.cursor.y);
+			if (old_y != term.cursor.y)
 				draw_line(vt, old_y);
 			break;
 
@@ -238,26 +228,25 @@ void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 }
 
 int main() {
-	load_font("/usr/share/kbd/consolefonts/default8x16.psfu.gz");
-	open_fb();
-	default_position();
-	center();
-
 	const char *sh[] = { "/bin/sh", NULL };
-	terminal.fd = run_pty(sh[0], sh);
-
-	terminal.tmt = tmt_open(terminal.height, terminal.width,
-	                        vt_callback, NULL, NULL);
-	if (!terminal.tmt) die("tmt_open(): %s\n", errstr);
-
-	bridge_stdin(terminal.fd);
-
 	char buf[1024];
 	int len;
 
-	while ((len = read(terminal.fd, buf, sizeof(buf))) > 0) {
-		tmt_write(terminal.tmt, buf, len);
+	load_font("/usr/share/kbd/consolefonts/default8x16.psfu.gz");
+	init_fb();
+	config_init();
+
+	center();
+
+	term.fd = run_pty(sh[0], sh);
+	term.tmt = tmt_open(term.height, term.width, vt_callback, NULL, NULL);
+	if (!term.tmt) die("tmt_open(): %s\n", errstr);
+
+	bridge_stdin(term.fd);
+
+	while ((len = read(term.fd, buf, sizeof(buf))) > 0) {
+		tmt_write(term.tmt, buf, len);
 	}
 
-	tmt_close(terminal.tmt);
+	tmt_close(term.tmt);
 }
