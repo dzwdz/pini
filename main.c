@@ -225,4 +225,6 @@ int main() {
 	term.fd = run_pty(sh[0], sh);
 	bridge_stdin(term.fd);
 	bridge_vt();
+
+	kill(-getpid(), SIGKILL);
 }
