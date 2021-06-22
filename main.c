@@ -19,51 +19,45 @@
 #define errstr (strerror(errno)) // i'm tried of typing it over and over
 
 struct {
-	TMT *tmt;
-	int fd;
-
-	int width;
-	int height;
-
-	int x;
-	int y;
-
+	int fd; // pty device
+	int width, height;
+	int x, y; // screenspace, in pixels
 	struct { int x; int y; } cursor;
 } term;
 
 struct {
-	uint32_t *buf;
-	int width;
-	int height;
+	uint32_t *buf; // mmapped framebuffer
+	int width, height;
 } fb;
 
 struct {
 	uint8_t *glyphs;
-	int length;
-	int charsize;
-	int width;
-	int height;
+	int length, charsize;
+	int width, height;
 } font;
 
-    void config_init();
-    void center();
+    void init_user();
+    void position();
     void init_fb();
     void load_font(const char *path);
-    void render_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg);
-     int run_pty(const char *cmd, const char *args[]);
-    void bridge_stdin(int target);
-uint32_t get_color(tmt_color_t color, bool fg);
+    void draw_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg);
     void draw_line(TMT *vt, int y);
+
+     int run_pty(const char *cmd, const char *args[]);
+uint32_t get_color(tmt_color_t color, bool fg);
+
+    void bridge_stdin(int target);
+    void bridge_vt();
     void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p);
 
+
 // will land in config.h very soon
-void config_init() {
+void init_user() {
 	term.width  = 80;
 	term.height = fb.height / font.height;
 }
 
-// TODO merge into a resize() fun
-void center() {
+void position() {
 	term.x = (fb.width  - font.width  * term.width ) / 2;
 	term.y = (fb.height - font.height * term.height) / 2;
 }
@@ -106,7 +100,7 @@ void load_font(const char *path) {
 		die("gzfread failed");
 }
 
-void render_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg) {
+void draw_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg) {
 	// straight up stolen from https://cmcenroe.me/2018/01/30/fbclock.html
 	if (c > font.length) return;
 	uint8_t *glyph = &font.glyphs[c * font.charsize];
@@ -118,6 +112,23 @@ void render_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg) {
 			fb.buf[(y * font.height + gy + term.y) * fb.width
 			      + x * font.width  + gx + term.x] = bit ? fg : bg;
 		}
+	}
+}
+
+void draw_line(TMT *vt, int y) {
+	const TMTSCREEN *s = tmt_screen(vt);
+
+	for (size_t x = 0; x < s->ncol; x++) {
+		TMTCHAR chr = s->lines[y]->chars[x];
+		uint32_t fg = get_color(chr.a.fg, true);
+		uint32_t bg = get_color(chr.a.bg, false);
+
+		if ((term.cursor.x == x && term.cursor.y == y) ^ chr.a.reverse) {
+			uint32_t tmp = fg;
+			fg = bg;
+			bg = tmp;
+		}
+		draw_char(x, y, chr.c, fg, bg);
 	}
 }
 
@@ -137,6 +148,16 @@ int run_pty(const char *cmd, const char *args[]) {
 			die("execvp(): %s\n", errstr);
 		default:
 			return fd;
+	}
+}
+
+// TODO this is bad...
+uint32_t get_color(tmt_color_t color, bool fg) {
+	switch (color) {
+		case TMT_COLOR_WHITE: return 0xebdbb2;
+		case TMT_COLOR_BLACK: return 0x1d2021;
+		default:              return fg ? get_color(TMT_COLOR_WHITE, fg)
+		                                : get_color(TMT_COLOR_BLACK, fg);
 	}
 }
 
@@ -164,31 +185,16 @@ void bridge_stdin(int target) {
 	}
 }
 
-// TODO this is bad...
-uint32_t get_color(tmt_color_t color, bool fg) {
-	switch (color) {
-		case TMT_COLOR_WHITE: return 0xebdbb2;
-		case TMT_COLOR_BLACK: return 0x1d2021;
-		default:              return fg ? get_color(TMT_COLOR_WHITE, fg)
-		                                : get_color(TMT_COLOR_BLACK, fg);
-	}
-}
+void bridge_vt() {
+	char buf[1024];
+	int len;
+	TMT *vt = tmt_open(term.height, term.width, vt_callback, NULL, NULL);
+	if (!vt) die("tmt_open(): %s\n", errstr);
 
-void draw_line(TMT *vt, int y) {
-	const TMTSCREEN *s = tmt_screen(vt);
-
-	for (size_t x = 0; x < s->ncol; x++) {
-		TMTCHAR chr = s->lines[y]->chars[x];
-		uint32_t fg = get_color(chr.a.fg, true);
-		uint32_t bg = get_color(chr.a.bg, false);
-
-		if ((term.cursor.x == x && term.cursor.y == y) ^ chr.a.reverse) {
-			uint32_t tmp = fg;
-			fg = bg;
-			bg = tmp;
-		}
-		render_char(x, y, chr.c, fg, bg);
-	}
+	// pty output -> virtual terminal
+	while ((len = read(term.fd, buf, sizeof(buf))) > 0)
+		tmt_write(vt, buf, len);
+	tmt_close(vt);
 }
 
 void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
@@ -229,24 +235,13 @@ void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 
 int main() {
 	const char *sh[] = { "/bin/sh", NULL };
-	char buf[1024];
-	int len;
 
 	load_font("/usr/share/kbd/consolefonts/default8x16.psfu.gz");
 	init_fb();
-	config_init();
-
-	center();
+	init_user();
+	position();
 
 	term.fd = run_pty(sh[0], sh);
-	term.tmt = tmt_open(term.height, term.width, vt_callback, NULL, NULL);
-	if (!term.tmt) die("tmt_open(): %s\n", errstr);
-
 	bridge_stdin(term.fd);
-
-	while ((len = read(term.fd, buf, sizeof(buf))) > 0) {
-		tmt_write(term.tmt, buf, len);
-	}
-
-	tmt_close(term.tmt);
+	bridge_vt();
 }
