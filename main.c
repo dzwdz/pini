@@ -36,31 +36,22 @@ struct {
 	int width, height;
 } font;
 
+// defined in config.h
     void init_user();
     void position();
+uint32_t get_color(tmt_color_t color, bool fg);
+
     void init_fb();
     void load_font(const char *path);
     void draw_char(uint32_t x, uint32_t y, char c, uint32_t fg, uint32_t bg);
     void draw_line(TMT *vt, int y);
-
      int run_pty(const char *cmd, const char *args[]);
-uint32_t get_color(tmt_color_t color, bool fg);
-
     void bridge_stdin(int target);
     void bridge_vt();
     void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p);
 
+#include "config.h"
 
-// will land in config.h very soon
-void init_user() {
-	term.width  = 80;
-	term.height = fb.height / font.height;
-}
-
-void position() {
-	term.x = (fb.width  - font.width  * term.width ) / 2;
-	term.y = (fb.height - font.height * term.height) / 2;
-}
 
 void init_fb() {
 	struct fb_var_screeninfo info;
@@ -148,16 +139,6 @@ int run_pty(const char *cmd, const char *args[]) {
 			die("execvp(): %s\n", errstr);
 		default:
 			return fd;
-	}
-}
-
-// TODO this is bad...
-uint32_t get_color(tmt_color_t color, bool fg) {
-	switch (color) {
-		case TMT_COLOR_WHITE: return 0xebdbb2;
-		case TMT_COLOR_BLACK: return 0x1d2021;
-		default:              return fg ? get_color(TMT_COLOR_WHITE, fg)
-		                                : get_color(TMT_COLOR_BLACK, fg);
 	}
 }
 
