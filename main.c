@@ -217,7 +217,7 @@ void vt_callback(tmt_msg_t m, TMT *vt, const void *a, void *p) {
 int main() {
 	const char *sh[] = { "/bin/sh", NULL };
 
-	load_font("/usr/share/kbd/consolefonts/default8x16.psfu.gz");
+	load_font(FONT_PATH);
 	init_fb();
 	init_user();
 	position();
